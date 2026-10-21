@@ -1,11 +1,19 @@
 """A small document-processing pipeline with injectable stages."""
 
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from typing import Literal, Protocol, TypeAlias, TypedDict, cast
 
 from pipeline_observability.monitor import PipelineMonitor
 
 ParsedContent: TypeAlias = tuple[str, ...]
+StageName: TypeAlias = Literal[
+    "document_loading",
+    "parsing",
+    "retrieval",
+    "model_inference",
+    "output_validation",
+]
 
 
 class StageRecord(TypedDict):
@@ -89,6 +97,8 @@ class NonEmptyAnswerValidator:
 
 
 class DocumentPipeline:
+    """Orchestrate stages; its monitor accumulates telemetry across runs."""
+
     def __init__(
         self,
         monitor: PipelineMonitor,
@@ -113,18 +123,21 @@ class DocumentPipeline:
     def summary(self) -> PipelineSummary:
         return cast(PipelineSummary, self.monitor.summary)
 
+    def _stage(self, stage_name: StageName) -> AbstractContextManager[None]:
+        return cast(AbstractContextManager[None], self.monitor.stage(stage_name))
+
     def run(self, document_id: str, query: str) -> str:
-        with self.monitor.stage("document_loading"):
+        with self._stage("document_loading"):
             raw_document = self._loader.load(document_id)
 
-        with self.monitor.stage("parsing"):
+        with self._stage("parsing"):
             parsed_document = self._parser.parse(raw_document)
 
-        with self.monitor.stage("retrieval"):
+        with self._stage("retrieval"):
             context = self._retriever.retrieve(parsed_document, query)
 
-        with self.monitor.stage("model_inference"):
+        with self._stage("model_inference"):
             candidate_answer = self._generator.generate(query, context)
 
-        with self.monitor.stage("output_validation"):
+        with self._stage("output_validation"):
             return self._validator.validate(candidate_answer)

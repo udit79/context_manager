@@ -38,6 +38,15 @@ def assert_summary_matches_records(pipeline: DocumentPipeline) -> None:
     assert summary["total_duration_seconds"] == pytest.approx(
         sum(record["duration_seconds"] for record in records)
     )
+    expected_average = (
+        sum(record["duration_seconds"] for record in records) / len(records)
+        if records
+        else None
+    )
+    if expected_average is None:
+        assert summary["avg_time"] is None
+    else:
+        assert summary["avg_time"] == pytest.approx(expected_average)
     assert summary["stage_order"] == [record["stage_name"] for record in records]
     assert summary["err_freq"] == dict(
         Counter(
@@ -133,7 +142,7 @@ class RecordingStages:
 
 
 @pytest.mark.parametrize(
-    ("failed_stage", "completed_stages"),
+    ("failed_stage", "executed_stages"),
     [
         ("document_loading", ["document_loading"]),
         ("parsing", ["document_loading", "parsing"]),
@@ -146,7 +155,7 @@ class RecordingStages:
     ],
 )
 def test_stage_failure_records_executed_stages_and_stops_pipeline(
-    failed_stage: str, completed_stages: list[str]
+    failed_stage: str, executed_stages: list[str]
 ):
     original_error = RuntimeError(f"{failed_stage} failed")
     stages = RecordingStages(fail_at=failed_stage, error=original_error)
@@ -172,18 +181,42 @@ def test_stage_failure_records_executed_stages_and_stops_pipeline(
         pipeline.run("unused", "unused")
 
     assert caught.value is original_error
-    assert stages.executed == completed_stages
-    assert [record["stage_name"] for record in pipeline.records] == completed_stages
+    assert stages.executed == executed_stages
+    assert [record["stage_name"] for record in pipeline.records] == executed_stages
     assert [record["sequence"] for record in pipeline.records] == list(
-        range(1, len(completed_stages) + 1)
+        range(1, len(executed_stages) + 1)
     )
     assert [record["status"] for record in pipeline.records] == [
         "success"
-    ] * (len(completed_stages) - 1) + ["failed"]
+    ] * (len(executed_stages) - 1) + ["failed"]
     assert pipeline.records[-1]["exception_type"] == "RuntimeError"
     assert [record["duration_seconds"] for record in pipeline.records] == pytest.approx(
-        [0.25] * len(completed_stages)
+        [0.25] * len(executed_stages)
     )
+    assert_summary_matches_records(pipeline)
+
+
+def test_reusing_pipeline_accumulates_records_across_runs():
+    pipeline = make_pipeline(
+        clock=fake_clock(
+            *[
+                reading
+                for start in (0.0, 10.0)
+                for stage in range(5)
+                for reading in (start + stage, start + stage + 0.25)
+            ]
+        )
+    )
+
+    first_answer = pipeline.run("guide", "What does observability explain?")
+    second_answer = pipeline.run("guide", "What does monitoring record?")
+
+    assert first_answer.startswith("Answer to 'What does observability explain?'")
+    assert second_answer.startswith("Answer to 'What does monitoring record?'")
+    assert len(pipeline.records) == 10
+    assert [record["sequence"] for record in pipeline.records] == list(range(1, 11))
+    assert pipeline.summary["total_stages"] == 10
+    assert pipeline.summary["stage_order"] == STAGE_ORDER * 2
     assert_summary_matches_records(pipeline)
 
 
